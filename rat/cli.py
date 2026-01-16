@@ -210,12 +210,12 @@ def main():
     )
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
 
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    subparsers = parser.add_subparsers(dest="subcommand", help="Commands")
     setup_parsers(subparsers)
 
     args = parser.parse_args()
 
-    if not args.command:
+    if not args.subcommand:
         parser.print_help()
         sys.exit(1)
 

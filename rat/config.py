@@ -9,7 +9,7 @@ CONFIG_DIR = Path.home() / ".config" / "rat"
 CONFIG_FILE = CONFIG_DIR / "hosts.json"
 
 
-DEFAULT_PASSWORD = "ubuntu123!"
+DEFAULT_PASSWORD = "ubuntu123"
 
 
 @dataclass
