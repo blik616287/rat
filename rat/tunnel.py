@@ -49,17 +49,17 @@ def get_tunnel_pid(host_name: str, tunnel_type: str) -> Optional[int]:
 
 def start_daemon_process(cmd: List[str]) -> Optional[int]:
     """Start a daemon process and return its PID if successful."""
-    with subprocess.Popen(
+    proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
-    ) as proc:
-        # Wait a bit for it to start
-        time.sleep(2)
+    )
+    # Wait a bit for it to start
+    time.sleep(2)
 
-        if proc.poll() is None:
-            # Process is still running (daemon started successfully)
-            return proc.pid
-        # Process exited (failed to start)
-        return None
+    if proc.poll() is None:
+        # Process is still running (daemon started successfully)
+        return proc.pid
+    # Process exited (failed to start)
+    return None
 
 
 def start_zrok_access(host: Host) -> bool:
