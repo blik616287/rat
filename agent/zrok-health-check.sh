@@ -24,19 +24,40 @@ if ! zrok status 2>&1 | grep -q "Account Token.*<<SET>>"; then
     log "zrok enabled"
 fi
 
-# Test 2: Can we reach the zrok API? (catches stale Ziti identity)
-if ! zrok overview >/dev/null 2>&1; then
+# Test 2: Fetch the API overview once, and decide whether we can trust it.
+#
+# This call fails constantly for transient reasons unrelated to our share: DNS
+# blips ("no such host") and 502/503/504 from the zrok controller. Treating any
+# failure as "the identity is stale" and running `zrok disable` tears down the
+# whole environment -- and every share in it -- over a momentary network glitch.
+# So: only re-enrol on a genuine auth failure, and otherwise fail closed.
+set +e
+OVERVIEW_OUTPUT=$(zrok overview 2>&1)
+OVERVIEW_RC=$?
+set -e
+
+if echo "$OVERVIEW_OUTPUT" | grep -qi "INVALID_AUTH\|UNAUTHORIZED\|unable to load\|cannot get current identity"; then
     log "REPAIR: zrok identity stale, re-enabling..."
     zrok disable 2>/dev/null || true
     zrok enable "$ZROK_TOKEN"
     log "zrok re-enabled"
-fi
+elif [ "$OVERVIEW_RC" -ne 0 ] || ! echo "$OVERVIEW_OUTPUT" | grep -q '"environments"'; then
+    log "SKIP: zrok API did not return a usable overview this cycle (rc=${OVERVIEW_RC})"
+    log "SKIP: ${OVERVIEW_OUTPUT}"
+    log "SKIP: leaving tunnel and account state untouched; will retry next cycle"
+    exit 0
 
-# Test 3: Does our share still exist?
-if ! zrok overview 2>&1 | grep -q "$SHARE_NAME"; then
-    log "REPAIR: share '${SHARE_NAME}' missing, re-creating..."
-    zrok reserve private localhost:22 --backend-mode tcpTunnel --unique-name "$SHARE_NAME" --json-output
-    log "share re-created"
+# Test 3: The overview is trustworthy. Is our reserved share actually absent?
+elif ! echo "$OVERVIEW_OUTPUT" | grep -q "\"shareToken\":\"${SHARE_NAME}\""; then
+    log "REPAIR: share '${SHARE_NAME}' absent from a valid API response, recreating..."
+    if zrok reserve private localhost:22 --backend-mode tcpTunnel --unique-name "$SHARE_NAME" --json-output; then
+        log "share re-created"
+    else
+        log "ERROR: could not reserve '${SHARE_NAME}'; NOT releasing it."
+        log "ERROR: a failed reserve usually means an unhealthy controller, and a"
+        log "ERROR: release would permanently delete the share if it still exists."
+        exit 1
+    fi
 fi
 
 # Test 4: Is the systemd service actually healthy?

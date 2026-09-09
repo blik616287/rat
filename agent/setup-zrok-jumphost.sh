@@ -99,13 +99,28 @@ else
 fi
 
 echo "  Creating reserved share..."
-if zrok overview 2>&1 | grep -q "$SHARE_NAME"; then
+set +e
+OVERVIEW=$(zrok overview 2>&1)
+OVERVIEW_RC=$?
+set -e
+if [ "$OVERVIEW_RC" -ne 0 ] || ! echo "$OVERVIEW" | grep -q '"environments"'; then
+    echo "  ERROR: could not read the zrok overview, so the state of '${SHARE_NAME}'"
+    echo "  ERROR: is unknown. Refusing to guess. (rc=${OVERVIEW_RC})"
+    echo "  ERROR: ${OVERVIEW}"
+    exit 1
+fi
+
+if echo "$OVERVIEW" | grep -q "\"shareToken\":\"${SHARE_NAME}\""; then
     echo "  Share '${SHARE_NAME}' already exists"
 else
     if ! zrok reserve private localhost:22 --backend-mode tcpTunnel --unique-name "$SHARE_NAME" --json-output 2>&1; then
-        echo "  Share name '${SHARE_NAME}' conflict (orphaned from old environment), releasing and re-creating..."
-        zrok release "$SHARE_NAME" 2>/dev/null || true
-        zrok reserve private localhost:22 --backend-mode tcpTunnel --unique-name "$SHARE_NAME" --json-output
+        echo "  ERROR: could not reserve '${SHARE_NAME}'."
+        echo "  ERROR: A failed reserve usually means the zrok controller is unhealthy,"
+        echo "  ERROR: not that the name is taken. Not releasing automatically: if the"
+        echo "  ERROR: share does still exist server-side, a release destroys it."
+        echo "  ERROR: If you are certain this name is an orphan from a rebuilt host:"
+        echo "  ERROR:     zrok release ${SHARE_NAME} && re-run this script"
+        exit 1
     fi
     echo "  Reserved share created: ${SHARE_NAME}"
 fi
@@ -197,42 +212,77 @@ NEEDS_RESTART=false
 
 log() { echo "[$(date -Iseconds)] $*"; }
 
+# Helper: run zrok commands with a pseudo-TTY so they don't fail with
+# "open /dev/tty: no such device or address" under systemd.
+zrok_pty() { script -qefc "zrok $*" /dev/null 2>&1 | tr -d '\r'; }
+
 # Test 1: Is zrok enabled?
-if ! zrok status 2>&1 | grep -q "Account Token.*<<SET>>"; then
+if ! zrok_pty status | grep -q "Account Token.*<<SET>>"; then
     log "REPAIR: zrok not enabled"
     sudo systemctl stop zrok-ssh.service 2>/dev/null || true
-    zrok enable "$ZROK_TOKEN"
+    zrok_pty enable "$ZROK_TOKEN"
     log "zrok enabled"
     NEEDS_RESTART=true
 fi
 
-# Test 2: Can we reach the zrok API? (catches stale Ziti identity)
-if ! zrok overview >/dev/null 2>&1; then
-    log "REPAIR: zrok identity stale, re-enabling..."
-    sudo systemctl stop zrok-ssh.service 2>/dev/null || true
-    zrok disable 2>/dev/null || true
-    zrok enable "$ZROK_TOKEN"
-    log "zrok re-enabled"
-    NEEDS_RESTART=true
+# Test 2: Fetch the API overview once, and decide whether we can trust it.
+#
+# This call fails constantly for transient reasons that have nothing to do with
+# our share: DNS blips ("no such host"), and 502/503/504 from the zrok
+# controller. Historically this script treated ANY unusable output as "the share
+# is gone" and went on to delete and recreate it -- which is how a 30-second
+# network blip turned into a permanently deleted share. So: fail closed. If we
+# cannot positively confirm what the API thinks, we change nothing.
+set +e
+OVERVIEW_OUTPUT=$(zrok_pty overview 2>&1)
+OVERVIEW_RC=$?
+set -e
+
+if [ "$NEEDS_RESTART" = false ]; then
+    if echo "$OVERVIEW_OUTPUT" | grep -qi "INVALID_AUTH\|UNAUTHORIZED\|unable to load\|cannot get current identity"; then
+        # A real authentication failure: the identity is stale, re-enrol.
+        log "REPAIR: zrok identity stale, re-enabling..."
+        sudo systemctl stop zrok-ssh.service 2>/dev/null || true
+        zrok_pty disable 2>/dev/null || true
+        zrok_pty enable "$ZROK_TOKEN"
+        log "zrok re-enabled"
+        NEEDS_RESTART=true
+    elif [ "$OVERVIEW_RC" -ne 0 ] || ! echo "$OVERVIEW_OUTPUT" | grep -q '"environments"'; then
+        # Transient failure. We do NOT know the state of our share, so we must
+        # not touch the tunnel or the account. A running tunnel keeps running.
+        log "SKIP: zrok API did not return a usable overview this cycle (rc=${OVERVIEW_RC})"
+        log "SKIP: ${OVERVIEW_OUTPUT}"
+        log "SKIP: leaving tunnel and account state untouched; will retry next cycle"
+        exit 0
+    fi
 fi
 
-# Test 3: Does our share still exist?
-if ! zrok overview 2>&1 | grep -q "$SHARE_NAME"; then
-    log "REPAIR: share '${SHARE_NAME}' missing, re-creating..."
-    sudo systemctl stop zrok-ssh.service 2>/dev/null || true
-    if ! zrok reserve private localhost:22 --backend-mode tcpTunnel --unique-name "$SHARE_NAME" --json-output 2>&1; then
-        log "share name conflict, releasing orphaned share and retrying..."
-        zrok release "$SHARE_NAME" 2>/dev/null || true
-        zrok reserve private localhost:22 --backend-mode tcpTunnel --unique-name "$SHARE_NAME" --json-output
+# Test 3: The overview is trustworthy. Is our reserved share actually absent?
+if [ "$NEEDS_RESTART" = false ]; then
+    if ! echo "$OVERVIEW_OUTPUT" | grep -q "\"shareToken\":\"${SHARE_NAME}\""; then
+        log "REPAIR: share '${SHARE_NAME}' absent from a valid API response, recreating..."
+
+        # Reserve FIRST, and only tear down the tunnel once we have a share to
+        # point it at. Never "release and retry": a failing reserve does not
+        # mean a name conflict -- it is usually the controller being unhealthy
+        # -- and releasing on that assumption permanently destroys a share that
+        # is still live and serving traffic.
+        if zrok_pty reserve private localhost:22 --backend-mode tcpTunnel --unique-name "$SHARE_NAME" --json-output; then
+            log "share re-created"
+            NEEDS_RESTART=true
+        else
+            log "ERROR: could not reserve '${SHARE_NAME}'"
+            log "ERROR: NOT releasing the share -- if it still exists server-side a"
+            log "ERROR: release would delete it for good. Leaving everything as-is."
+            exit 1
+        fi
     fi
-    log "share re-created"
-    NEEDS_RESTART=true
 fi
 
 # Test 4: Is the service healthy or does it need a (re)start?
 if [ "$NEEDS_RESTART" = true ]; then
-    log "REPAIR: restarting zrok-ssh after identity/share repair..."
-    sudo systemctl start zrok-ssh.service
+    log "REPAIR: (re)starting zrok-ssh..."
+    sudo systemctl restart zrok-ssh.service 2>/dev/null || sudo systemctl start zrok-ssh.service
     sleep 3
     if systemctl is-active --quiet zrok-ssh.service; then
         log "zrok-ssh service started"
@@ -241,7 +291,7 @@ if [ "$NEEDS_RESTART" = true ]; then
         exit 1
     fi
 elif systemctl is-active --quiet zrok-ssh.service; then
-    RECENT_ERRORS=$(journalctl -u zrok-ssh.service --since "5 minutes ago" --no-pager 2>/dev/null | grep -c "INVALID_AUTH\|UNAUTHORIZED\|not found" || true)
+    RECENT_ERRORS=$(journalctl -u zrok-ssh.service --since "5 minutes ago" --no-pager 2>/dev/null | grep -c "INVALID_AUTH\|UNAUTHORIZED" || true)
     if [ "$RECENT_ERRORS" -gt 3 ]; then
         log "REPAIR: zrok-ssh service unhealthy (${RECENT_ERRORS} auth errors in last 5 min), restarting..."
         sudo systemctl restart zrok-ssh.service
