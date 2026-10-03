@@ -124,7 +124,7 @@ class TestStartDaemonProcess:
             mock_proc = mock.MagicMock()
             mock_proc.poll.return_value = None  # Process still running
             mock_proc.pid = 12345
-            mock_popen.return_value.__enter__.return_value = mock_proc
+            mock_popen.return_value = mock_proc
             with mock.patch("rat.tunnel.time.sleep"):
                 pid = start_daemon_process(["sleep", "100"])
                 assert pid == 12345
@@ -134,7 +134,7 @@ class TestStartDaemonProcess:
         with mock.patch("rat.tunnel.subprocess.Popen") as mock_popen:
             mock_proc = mock.MagicMock()
             mock_proc.poll.return_value = 1  # Process exited
-            mock_popen.return_value.__enter__.return_value = mock_proc
+            mock_popen.return_value = mock_proc
             with mock.patch("rat.tunnel.time.sleep"):
                 pid = start_daemon_process(["false"])
                 assert pid is None

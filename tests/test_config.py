@@ -9,6 +9,7 @@ import pytest
 
 from rat.config import (
     Host,
+    build_ssh_args,
     DEFAULT_PASSWORD,
     ensure_config_dir,
     load_hosts,
@@ -232,3 +233,60 @@ class TestConfigFunctions:
                 assert len(hosts) == 2
                 assert "host1" in hosts
                 assert "host2" in hosts
+
+
+class TestBuildSshArgs:
+    """Tests for build_ssh_args."""
+
+    def test_key_auth_args(self):
+        """Test key auth builds an ssh command with the identity file."""
+        host = Host(name="h", zrok_token="t", ssh_user="blik", ssh_key="/home/blik/.ssh/k")
+        executable, args = build_ssh_args(host)
+        assert executable == "ssh"
+        assert args[:1] == ["ssh"]
+        assert "-i" in args and "/home/blik/.ssh/k" in args
+        assert args[-1] == "blik@localhost"
+
+    def test_password_auth_args(self):
+        """Test password auth shells out through sshpass."""
+        host = Host(name="h", zrok_token="t", ssh_user="b", ssh_password="pw")
+        executable, args = build_ssh_args(host)
+        assert executable == "sshpass"
+        assert args[:3] == ["sshpass", "-p", "pw"]
+
+    def test_known_hosts_file_skipped(self):
+        """Test localhost port reuse cannot collide in known_hosts."""
+        host = Host(name="h", zrok_token="t", ssh_user="b", ssh_key="/k")
+        _, args = build_ssh_args(host)
+        assert "UserKnownHostsFile=/dev/null" in args
+        assert "StrictHostKeyChecking=no" in args
+
+    def test_stdin_closed_for_remote_command(self):
+        """Test a remote command does not consume the caller's stdin."""
+        host = Host(name="h", zrok_token="t", ssh_user="b", ssh_key="/k")
+        with mock.patch.dict("os.environ", {}, clear=True):
+            _, args = build_ssh_args(host, ["echo", "hi"])
+        assert "-n" in args
+        assert args[-2:] == ["echo", "hi"]
+
+    def test_stdin_open_without_remote_command(self):
+        """Test an interactive session keeps stdin, which -n would break."""
+        host = Host(name="h", zrok_token="t", ssh_user="b", ssh_key="/k")
+        with mock.patch.dict("os.environ", {}, clear=True):
+            _, args = build_ssh_args(host)
+        assert "-n" not in args
+
+    def test_stdin_opt_in_via_env(self):
+        """Test RAT_SSH_STDIN keeps stdin open for piping into a remote command."""
+        host = Host(name="h", zrok_token="t", ssh_user="b", ssh_key="/k")
+        with mock.patch.dict("os.environ", {"RAT_SSH_STDIN": "1"}, clear=True):
+            _, args = build_ssh_args(host, ["cat"])
+        assert "-n" not in args
+
+    def test_tunnel_flags_preserved(self):
+        """Test caller-supplied flags survive alongside the stdin guard."""
+        host = Host(name="h", zrok_token="t", ssh_user="b", ssh_key="/k")
+        with mock.patch.dict("os.environ", {}, clear=True):
+            _, args = build_ssh_args(host, ssh_flags=["-N", "-L", "5901:localhost:5901"])
+        assert "-N" in args and "-L" in args
+        assert "-n" not in args

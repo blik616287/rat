@@ -1,6 +1,7 @@
 """Configuration management for RAT."""
 
 import json
+import os
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from typing import Dict, Optional
@@ -122,13 +123,25 @@ def build_ssh_args(host: Host, extra_args: list = None, ssh_flags: list = None) 
     """
     extra = extra_args or []
     flags = ssh_flags or []
+
+    # Every host is reached as localhost:<port>, so a port reused by another host
+    # collides in known_hosts and ssh refuses to connect. Skip the file entirely —
+    # zrok, not the host key, is what authenticates the far end of the tunnel.
     connection_args = [
         "-o",
         "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
         "-p",
         str(host.ssh_port),
         f"{host.ssh_user}@localhost",
     ]
+
+    # Given a remote command, ssh reads the caller's stdin, which silently eats the
+    # rest of a script piped into a shell that calls rat. Set RAT_SSH_STDIN to pipe
+    # input to the remote command instead.
+    if extra and not os.environ.get("RAT_SSH_STDIN"):
+        flags = flags + ["-n"]
 
     if host.ssh_key:
         args = ["ssh"] + flags + ["-i", host.ssh_key] + connection_args + extra

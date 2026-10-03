@@ -49,6 +49,9 @@ def get_tunnel_pid(host_name: str, tunnel_type: str) -> Optional[int]:
 
 def start_daemon_process(cmd: List[str]) -> Optional[int]:
     """Start a daemon process and return its PID if successful."""
+    # Not a context manager: the tunnel has to outlive this call, and `with` would
+    # wait on it. Its lifetime is tracked by PID file instead (see stop_* below).
+    # pylint: disable-next=consider-using-with
     proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
     )
