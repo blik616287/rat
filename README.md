@@ -289,6 +289,30 @@ zrok ls
 sudo journalctl -u zrok-ssh -f
 ```
 
+### macOS Host (SSH only)
+
+A Mac can be a jump host too. It uses launchd instead of systemd, and there's no VNC. Run this from a checkout of the repo as the user who will own the share (not as root):
+
+```bash
+./agent/setup-zrok-ssh-macos.sh <zrok-enable-token> [share-name]
+```
+
+It does the following:
+- installs zrok **v1.1.13** to `/usr/local/bin/zrok`. zrok v2 removed reserved shares, which RAT depends on.
+- checks that Remote Login (SSH) is on.
+- enables zrok and reserves the share.
+- installs two LaunchDaemons. `io.rat.zrok-ssh` keeps the share running and starts it at boot. `io.rat.zrok-health` runs `zrok-health-check-macos.sh` every 5 minutes.
+
+Logs are written to `~/Library/Logs/rat/`.
+
+```bash
+sudo launchctl print system/io.rat.zrok-ssh | grep state
+sudo launchctl kickstart system/io.rat.zrok-health    # run the health check now
+tail -f ~/Library/Logs/rat/zrok-health.log
+```
+
+The Mac's password isn't `ubuntu123`, so add the host with `-u <mac-user>` and either `-p <password>` or `-k <key>`.
+
 ## Development
 
 ### Makefile Targets
